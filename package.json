@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js"
   },
-  "dependencies": {
+ "dependencies": {
   "cors": "^2.8.5",
   "dji-thermal-sdk": "^1.0.4",
   "express": "^4.19.0",
