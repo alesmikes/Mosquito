@@ -24,12 +24,18 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
     const xRaw = req.body?.x ?? req.query?.x;
     const yRaw = req.body?.y ?? req.query?.y;
     const emissivityRaw = req.body?.emissivity ?? req.query?.emissivity;
+    const includeRawFlag =
+      req.body?.include_raw_data ?? req.query?.include_raw_data;
 
     const hasCoords =
       typeof xRaw !== "undefined" &&
       xRaw !== "" &&
       typeof yRaw !== "undefined" &&
       yRaw !== "";
+
+    const includeRawData =
+      typeof includeRawFlag === "string" &&
+      includeRawFlag.toLowerCase() === "true";
 
     let x = null;
     let y = null;
@@ -104,8 +110,8 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
 
     // 🟢 REŽIM 2: bez x,y → globální statistika pro celou fotku
 
-    // 1) Převést validní pixely na °C a odfiltrovat zjevné nesmysly
-    const tempsC = [];
+    // 1) Převést validní pixely na °C a odfiltrovat zjevné nesmysly pro statistiku
+    const tempsCForStats = [];
 
     for (const v of data) {
       // ignoruj no-data / saturaci
@@ -116,17 +122,17 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
       // rozumný rozsah – můžeš doladit podle use-case
       if (t < -40 || t > 150) continue;
 
-      tempsC.push(t);
+      tempsCForStats.push(t);
     }
 
-    if (tempsC.length === 0) {
+    if (tempsCForStats.length === 0) {
       return res.status(500).json({
         error: "No valid thermal samples for statistics.",
       });
     }
 
     // 2) Seřadit pro robustní percentilové min/max
-    const sorted = [...tempsC].sort((a, b) => a - b);
+    const sorted = [...tempsCForStats].sort((a, b) => a - b);
     const n = sorted.length;
 
     const p = (q) => {
@@ -152,7 +158,8 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
     }
     const avgC = sumC / count;
 
-    return res.json({
+    // Základní response
+    const response = {
       width,
       height,
       parameters,
@@ -163,9 +170,20 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
         samples: n,
         usedForAvg: count,
       },
-      // jen pro debug/ukázku – prvních pár °C
       sampleTempsC: sorted.slice(0, 50),
-    });
+    };
+
+    // 🔥 include_raw_data=true → přidej celé pole teplot v °C
+    // 1D pole v pořadí data[y * width + x]
+    if (includeRawData) {
+      // žádné filtry, jen čistý převod všech pixelů na °C
+      response.temperaturesC = Array.from(data, (v) => v / 10);
+      // POZNÁMKA:
+      // délka = width * height,
+      // index = y * width + x
+    }
+
+    return res.json(response);
   } catch (err) {
     console.error("Error in /extract-thermal handler:", err);
     return res.status(500).json({
