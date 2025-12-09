@@ -6,6 +6,7 @@ const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 app.use(cors({ origin: "*" }));
+app.use(express.json());
 
 console.log("Starting Mosquito API server...");
 
@@ -19,7 +20,7 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
       return res.status(400).json({ error: "Missing file 'image'." });
     }
 
-    // x, y, emissivity z multipart/form-data (volitelné)
+    // Volitelné parametry z multipart/form-data (nebo query)
     const xRaw = req.body?.x ?? req.query?.x;
     const yRaw = req.body?.y ?? req.query?.y;
     const emissivityRaw = req.body?.emissivity ?? req.query?.emissivity;
@@ -32,9 +33,11 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
 
     let x = null;
     let y = null;
+
     if (hasCoords) {
       x = parseInt(xRaw, 10);
       y = parseInt(yRaw, 10);
+
       if (!Number.isInteger(x) || !Number.isInteger(y)) {
         return res.status(400).json({
           error: "Invalid coordinates; x and y must be integers.",
@@ -69,7 +72,7 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
       });
     }
 
-    // Pokud máme x,y → vrať jen teplotu bodu
+    // 🟡 REŽIM 1: pokud máme x,y → vrať jen teplotu bodu
     if (hasCoords) {
       if (x < 0 || x >= width || y < 0 || y >= height) {
         return res.status(400).json({
@@ -79,8 +82,8 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
         });
       }
 
-      const idx = y * width + x;
-      const tempRaw = data[idx]; // 0.1 °C jednotky
+      const idx = y * width + x; // index v 1D poli (row-major)
+      const tempRaw = data[idx]; // v 0.1 °C
       const tempC = tempRaw / 10;
 
       const emissivityUsed =
@@ -99,32 +102,51 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
       });
     }
 
-    // Jinak → globální statistika pro celou fotku (původní chování)
-    let min = Infinity;
-    let max = -Infinity;
-    let sum = 0;
+    // 🟢 REŽIM 2: bez x,y → vrať globální statistiku pro celou fotku
+    const tempsC = [];
 
     for (const v of data) {
-      if (v < min) min = v;
-      if (v > max) max = v;
-      sum += v;
+      // ignoruj no-data / saturaci
+      if (v === 0 || v === 65535) continue;
+
+      const t = v / 10; // 0.1 °C -> °C
+
+      // volitelný realistický rozsah (lidi / střechy / panely)
+      if (t < -50 || t > 150) continue;
+
+      tempsC.push(t);
     }
 
-    const avg = sum / data.length;
+    if (tempsC.length === 0) {
+      return res.status(500).json({
+        error: "No valid thermal samples for statistics.",
+      });
+    }
+
+    let minC = Infinity;
+    let maxC = -Infinity;
+    let sumC = 0;
+
+    for (const t of tempsC) {
+      if (t < minC) minC = t;
+      if (t > maxC) maxC = t;
+      sumC += t;
+    }
+
+    const avgC = sumC / tempsC.length;
 
     return res.json({
       width,
       height,
       parameters,
       stats: {
-        minRaw: min,
-        maxRaw: max,
-        avgRaw: avg,
-        minC: min / 10,
-        maxC: max / 10,
-        avgC: avg / 10,
+        minC,
+        maxC,
+        avgC,
+        samples: tempsC.length,
       },
-      sampleTempsC: Array.from(data.slice(0, 50)).map((x) => x / 10),
+      // pro UI / debug – pár vzorků v °C
+      sampleTempsC: tempsC.slice(0, 50),
     });
   } catch (err) {
     console.error("Error in /extract-thermal handler:", err);
@@ -134,9 +156,6 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
     });
   }
 });
-
-
-
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
