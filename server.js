@@ -19,29 +19,33 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
       return res.status(400).json({ error: "Missing file 'image'." });
     }
 
-    // x, y, emissivity z multipart/form-data
+    // x, y, emissivity z multipart/form-data (volitelné)
     const xRaw = req.body?.x ?? req.query?.x;
     const yRaw = req.body?.y ?? req.query?.y;
     const emissivityRaw = req.body?.emissivity ?? req.query?.emissivity;
 
-    if (typeof xRaw === "undefined" || typeof yRaw === "undefined") {
-      return res.status(400).json({
-        error: "Missing coordinates 'x' and 'y'.",
-      });
+    const hasCoords =
+      typeof xRaw !== "undefined" &&
+      xRaw !== "" &&
+      typeof yRaw !== "undefined" &&
+      yRaw !== "";
+
+    let x = null;
+    let y = null;
+    if (hasCoords) {
+      x = parseInt(xRaw, 10);
+      y = parseInt(yRaw, 10);
+      if (!Number.isInteger(x) || !Number.isInteger(y)) {
+        return res.status(400).json({
+          error: "Invalid coordinates; x and y must be integers.",
+        });
+      }
     }
 
-    const x = parseInt(xRaw, 10);
-    const y = parseInt(yRaw, 10);
     const emissivityOverride =
       typeof emissivityRaw === "string" && emissivityRaw !== ""
         ? parseFloat(emissivityRaw)
         : null;
-
-    if (!Number.isInteger(x) || !Number.isInteger(y)) {
-      return res.status(400).json({
-        error: "Invalid coordinates; x and y must be integers.",
-      });
-    }
 
     let djiModule;
     try {
@@ -65,33 +69,62 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
       });
     }
 
-    if (x < 0 || x >= width || y < 0 || y >= height) {
-      return res.status(400).json({
-        error: "Coordinates out of bounds.",
-        width,
-        height,
+    // Pokud máme x,y → vrať jen teplotu bodu
+    if (hasCoords) {
+      if (x < 0 || x >= width || y < 0 || y >= height) {
+        return res.status(400).json({
+          error: "Coordinates out of bounds.",
+          width,
+          height,
+        });
+      }
+
+      const idx = y * width + x;
+      const tempRaw = data[idx]; // 0.1 °C jednotky
+      const tempC = tempRaw / 10;
+
+      const emissivityUsed =
+        emissivityOverride ??
+        (parameters && parameters.emissivity) ??
+        null;
+
+      console.log(
+        `Pixel temperature [${x},${y}] = ${tempC}°C (raw=${tempRaw}, emissivity=${emissivityUsed})`
+      );
+
+      return res.json({
+        temperature: tempC,
+        x,
+        y,
       });
     }
 
-    const idx = y * width + x; // řádek po řádku
-    const tempRaw = data[idx]; // 0.1 °C jednotky (typicky)
-    const tempC = tempRaw / 10;
+    // Jinak → globální statistika pro celou fotku (původní chování)
+    let min = Infinity;
+    let max = -Infinity;
+    let sum = 0;
 
-    // emise, které backend reálně použil (jen info, klidně to ignoruj)
-    const emissivityUsed =
-      emissivityOverride ??
-      (parameters && parameters.emissivity) ??
-      null;
+    for (const v of data) {
+      if (v < min) min = v;
+      if (v > max) max = v;
+      sum += v;
+    }
 
-    console.log(
-      `Pixel temperature [${x},${y}] = ${tempC}°C (raw=${tempRaw}, emissivity=${emissivityUsed})`
-    );
+    const avg = sum / data.length;
 
-    // 🔥 TADY: přesně to, co Base44 chce
     return res.json({
-      temperature: tempC,
-      x,
-      y,
+      width,
+      height,
+      parameters,
+      stats: {
+        minRaw: min,
+        maxRaw: max,
+        avgRaw: avg,
+        minC: min / 10,
+        maxC: max / 10,
+        avgC: avg / 10,
+      },
+      sampleTempsC: Array.from(data.slice(0, 50)).map((x) => x / 10),
     });
   } catch (err) {
     console.error("Error in /extract-thermal handler:", err);
@@ -101,6 +134,7 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
     });
   }
 });
+
 
 
 
