@@ -102,7 +102,9 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
       });
     }
 
-    // 🟢 REŽIM 2: bez x,y → vrať globální statistiku pro celou fotku
+    // 🟢 REŽIM 2: bez x,y → globální statistika pro celou fotku
+
+    // 1) Převést validní pixely na °C a odfiltrovat zjevné nesmysly
     const tempsC = [];
 
     for (const v of data) {
@@ -111,8 +113,8 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
 
       const t = v / 10; // 0.1 °C -> °C
 
-      // volitelný realistický rozsah (lidi / střechy / panely)
-      if (t < -50 || t > 150) continue;
+      // rozumný rozsah – můžeš doladit podle use-case
+      if (t < -40 || t > 150) continue;
 
       tempsC.push(t);
     }
@@ -123,17 +125,32 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
       });
     }
 
-    let minC = Infinity;
-    let maxC = -Infinity;
+    // 2) Seřadit pro robustní percentilové min/max
+    const sorted = [...tempsC].sort((a, b) => a - b);
+    const n = sorted.length;
+
+    const p = (q) => {
+      // q v [0,1], např. 0.05 = 5. percentil
+      if (n === 1) return sorted[0];
+      const idx = Math.floor(q * (n - 1));
+      return sorted[idx];
+    };
+
+    // minC = 5. percentil (ignorujeme úplně nejchladnější marginální pixely)
+    const minC = p(0.05);
+    // maxC = 99. percentil (ignorujeme extrémní outlier nahoru)
+    const maxC = p(0.99);
+
+    // 3) Průměr spočítáme z "ořezaného" rozsahu (mezi 5 % a 99 %)
     let sumC = 0;
-
-    for (const t of tempsC) {
-      if (t < minC) minC = t;
-      if (t > maxC) maxC = t;
+    let count = 0;
+    for (let i = 0; i < n; i++) {
+      const t = sorted[i];
+      if (t < minC || t > maxC) continue;
       sumC += t;
+      count++;
     }
-
-    const avgC = sumC / tempsC.length;
+    const avgC = sumC / count;
 
     return res.json({
       width,
@@ -143,10 +160,11 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
         minC,
         maxC,
         avgC,
-        samples: tempsC.length,
+        samples: n,
+        usedForAvg: count,
       },
-      // pro UI / debug – pár vzorků v °C
-      sampleTempsC: tempsC.slice(0, 50),
+      // jen pro debug/ukázku – prvních pár °C
+      sampleTempsC: sorted.slice(0, 50),
     });
   } catch (err) {
     console.error("Error in /extract-thermal handler:", err);
