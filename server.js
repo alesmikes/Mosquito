@@ -31,8 +31,8 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
       });
     }
 
-    const { getTemperatureData } = djiModule;
-
+    const { getTemperatureData } = djiModule.default || djiModule;
+    
     const buffer = req.file.buffer;
     const { width, height, parameters, data } = getTemperatureData(buffer);
 
