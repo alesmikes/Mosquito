@@ -23,7 +23,6 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
     // Volitelné parametry z multipart/form-data (nebo query)
     const xRaw = req.body?.x ?? req.query?.x;
     const yRaw = req.body?.y ?? req.query?.y;
-    const emissivityRaw = req.body?.emissivity ?? req.query?.emissivity;
     const includeRawFlag =
       req.body?.include_raw_data ?? req.query?.include_raw_data;
 
@@ -51,11 +50,6 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
       }
     }
 
-    const emissivityOverride =
-      typeof emissivityRaw === "string" && emissivityRaw !== ""
-        ? parseFloat(emissivityRaw)
-        : null;
-
     let djiModule;
     try {
       djiModule = await import("dji-thermal-sdk");
@@ -78,7 +72,10 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
       });
     }
 
-    // 🟡 REŽIM 1: pokud máme x,y → vrať jen teplotu bodu
+    // Převod všech hodnot do °C
+    const temperaturesC = Array.from(data, (v) => v / 10);
+
+    // 🔵 REŽIM 1: pokud máme x,y → vrať jen teplotu bodu
     if (hasCoords) {
       if (x < 0 || x >= width || y < 0 || y >= height) {
         return res.status(400).json({
@@ -88,18 +85,10 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
         });
       }
 
-      const idx = y * width + x; // index v 1D poli (row-major)
-      const tempRaw = data[idx]; // v 0.1 °C
-      const tempC = tempRaw / 10;
+      const idx = y * width + x;
+      const tempC = temperaturesC[idx];
 
-      const emissivityUsed =
-        emissivityOverride ??
-        (parameters && parameters.emissivity) ??
-        null;
-
-      console.log(
-        `Pixel temperature [${x},${y}] = ${tempC}°C (raw=${tempRaw}, emissivity=${emissivityUsed})`
-      );
+      console.log(`Pixel temperature [${x},${y}] = ${tempC}°C`);
 
       return res.json({
         temperature: tempC,
@@ -108,79 +97,49 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
       });
     }
 
-    // 🟢 REŽIM 2: bez x,y → globální statistika pro celou fotku
+    // 🟢 REŽIM 2: globální statistika pro celou fotku (bez outlier triků)
+    let minC = Infinity;
+    let maxC = -Infinity;
+    let sumC = 0;
+    let count = 0;
 
-    // 1) Převést validní pixely na °C a odfiltrovat zjevné nesmysly pro statistiku
-    const tempsCForStats = [];
+    for (let i = 0; i < temperaturesC.length; i++) {
+      const raw = data[i];
+      const t = temperaturesC[i];
 
-    for (const v of data) {
-      // ignoruj no-data / saturaci
-      if (v === 0 || v === 65535) continue;
+      // ignoruj jen zjevné no-data/saturaci
+      if (raw === 0 || raw === 65535 || !Number.isFinite(t)) continue;
 
-      const t = v / 10; // 0.1 °C -> °C
-
-      // rozumný rozsah – můžeš doladit podle use-case
-      if (t < -40 || t > 150) continue;
-
-      tempsCForStats.push(t);
+      if (t < minC) minC = t;
+      if (t > maxC) maxC = t;
+      sumC += t;
+      count++;
     }
 
-    if (tempsCForStats.length === 0) {
+    if (count === 0) {
       return res.status(500).json({
         error: "No valid thermal samples for statistics.",
       });
     }
 
-    // 2) Seřadit pro robustní percentilové min/max
-    const sorted = [...tempsCForStats].sort((a, b) => a - b);
-    const n = sorted.length;
-
-    const p = (q) => {
-      // q v [0,1], např. 0.05 = 5. percentil
-      if (n === 1) return sorted[0];
-      const idx = Math.floor(q * (n - 1));
-      return sorted[idx];
-    };
-
-    // minC = 5. percentil (ignorujeme úplně nejchladnější marginální pixely)
-    const minC = p(0.05);
-    // maxC = 99. percentil (ignorujeme extrémní outlier nahoru)
-    const maxC = p(0.99);
-
-    // 3) Průměr spočítáme z "ořezaného" rozsahu (mezi 5 % a 99 %)
-    let sumC = 0;
-    let count = 0;
-    for (let i = 0; i < n; i++) {
-      const t = sorted[i];
-      if (t < minC || t > maxC) continue;
-      sumC += t;
-      count++;
-    }
     const avgC = sumC / count;
 
-    // Základní response
     const response = {
       width,
       height,
-      parameters,
+      parameters, // { emissivity, distance, humidity, reflection }
       stats: {
         minC,
         maxC,
         avgC,
-        samples: n,
-        usedForAvg: count,
+        samples: count,
       },
-      sampleTempsC: sorted.slice(0, 50),
+      sampleTempsC: temperaturesC.slice(0, 50),
     };
 
-    // 🔥 include_raw_data=true → přidej celé pole teplot v °C
-    // 1D pole v pořadí data[y * width + x]
     if (includeRawData) {
-      // žádné filtry, jen čistý převod všech pixelů na °C
-      response.temperaturesC = Array.from(data, (v) => v / 10);
-      // POZNÁMKA:
-      // délka = width * height,
-      // index = y * width + x
+      // 1D pole, index = y * width + x
+      response.temperaturesC = temperaturesC;
     }
 
     return res.json(response);
