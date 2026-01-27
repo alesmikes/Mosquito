@@ -5,7 +5,23 @@ import multer from "multer";
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
-app.use(cors({ origin: "*" }));
+/**
+ * ✅ Base44 / browser: aby šly číst custom headery (jinak budeš mít NaN)
+ */
+app.use(
+  cors({
+    origin: "*",
+    exposedHeaders: [
+      "X-Width",
+      "X-Height",
+      "X-Scale",
+      "X-Format",
+      "X-Unit",
+      "X-Params",
+    ],
+  })
+);
+
 app.use(express.json());
 
 console.log("Starting Mosquito API server...");
@@ -40,7 +56,7 @@ function parseScale(v) {
  *
  * Default (no x,y):
  *  - returns application/octet-stream with raw uint16 matrix
- *  - headers: X-Width, X-Height, X-Scale, X-Format=uint16, X-Unit=C
+ *  - headers: X-Width, X-Height, X-Scale, X-Format=uint16, X-Unit=C, X-Params=<json>
  */
 app.post("/extract-thermal", upload.single("image"), async (req, res) => {
   try {
@@ -58,9 +74,9 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
 
     const scale = parseScale(typeof scaleRaw === "string" ? scaleRaw : "");
     if (scale === null) {
-      return res
-        .status(400)
-        .json({ error: "Invalid 'scale'. Must be a positive number (e.g. 0.1)." });
+      return res.status(400).json({
+        error: "Invalid 'scale'. Must be a positive number (e.g. 0.1).",
+      });
     }
 
     let djiModule;
@@ -107,6 +123,7 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
           width,
           height,
           scale,
+          parameters: parameters ?? {},
         });
       }
 
@@ -118,7 +135,7 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
         width,
         height,
         scale,
-        parameters,
+        parameters: parameters ?? {},
       });
     }
 
@@ -133,8 +150,8 @@ app.post("/extract-thermal", upload.single("image"), async (req, res) => {
     res.setHeader("X-Format", "uint16");
     res.setHeader("X-Unit", "C");
 
-    // Pokud chceš, můžeš parametry poslat jako JSON string v headeru (malé):
-    // res.setHeader("X-Params", JSON.stringify(parameters ?? {}));
+    // ✅ Poslat parametry v hlavičce jako JSON (emisivita, distance, humidity, reflection... pokud je SDK vrací)
+    res.setHeader("X-Params", JSON.stringify(parameters ?? {}));
 
     return res.send(Buffer.from(u16.buffer));
   } catch (err) {
